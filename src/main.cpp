@@ -8,6 +8,7 @@ int main(int argc, char* argv[])
     try
     {
         Application application(argc, argv);
+        application.run();
     }
     catch (const std::exception& exception)
     {
@@ -16,7 +17,6 @@ int main(int argc, char* argv[])
     }
     catch (...)
     {
-        LOG_FATAL("Unknown exception");
         return 1;
     }
 

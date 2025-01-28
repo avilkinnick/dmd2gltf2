@@ -27,10 +27,10 @@ void log_message(
     log_message("WARN", ANSI_ESCAPE_CODE_YELLOW, __FILE__, __LINE__, format, ##__VA_ARGS__)
 
 #define LOG_INFO(format, ...) \
-    log_message("INFO", ANSI_ESCAPE_CODE_GREEN, format, ##__VA_ARGS__)
+    log_message("INFO", ANSI_ESCAPE_CODE_RESET, format, ##__VA_ARGS__)
 
 #define LOG_DEBUG(format, ...) \
-    log_message("DEBUG", ANSI_ESCAPE_CODE_BLUE, format, ##__VA_ARGS__)
+    log_message("DEBUG", ANSI_ESCAPE_CODE_GREEN, format, ##__VA_ARGS__)
 
 #define LOG_TRACE(format, ...) \
     log_message("TRACE", ANSI_ESCAPE_CODE_BLUE, format, ##__VA_ARGS__)
