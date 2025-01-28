@@ -1,0 +1,3 @@
+[submodule "dependencies/fastgltf"]
+	path = dependencies/fastgltf
+	url = https://github.com/spnda/fastgltf.git
