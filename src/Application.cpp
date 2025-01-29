@@ -168,8 +168,6 @@ void Application::convert_route()
         out_model_name = out_model_name.substr(0, out_model_name.length() - 4);
 
         std::ifstream texture_file(std::string(DMD_ROUTES_DIR) + '/' + route_name + ref.texture_path);
-        auto a = std::string(DMD_ROUTES_DIR) + '/' + route_name + ref.texture_path;
-        LOG_INFO("%s", a.c_str());
         if (texture_file)
         {
             if (!std::filesystem::exists(new_route_dir + ref.texture_path))
@@ -418,7 +416,7 @@ void convert_model(
     gltf_buffer.data.reserve(positions_byte_length + texcoords_byte_length + indices_byte_length);
     gltf_buffer.uri = out_model_name + ".bin";
 
-    std::ifstream bin_data(bin_file_path);
+    std::ifstream bin_data(bin_file_path, std::ios::binary);
     unsigned char byte;
     while (bin_data.read(reinterpret_cast<char*>(&byte), sizeof(unsigned char)))
     {

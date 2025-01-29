@@ -2,3 +2,4 @@
 *.user*
 *.vs*
 build/
+include/cmake_defines.h

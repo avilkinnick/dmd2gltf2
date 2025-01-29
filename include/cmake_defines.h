@@ -1,4 +1,4 @@
-#define DMD_MODELS_DIR "/home/ksv/work-ANI/Projects/ANI/dmd2gltf/models/dmd"
-#define GLTF_MODELS_DIR "/home/ksv/work-ANI/Projects/ANI/dmd2gltf/models/gltf"
-#define DMD_ROUTES_DIR "/home/ksv/work-ANI/Projects/ANI/dmd2gltf/routes/dmd"
-#define GLTF_ROUTES_DIR "/home/ksv/work-ANI/Projects/ANI/dmd2gltf/routes/gltf"
+#define DMD_MODELS_DIR "C:/work/dmd2gltf2/models/dmd"
+#define GLTF_MODELS_DIR "C:/work/dmd2gltf2/models/gltf"
+#define DMD_ROUTES_DIR "C:/work/dmd2gltf2/routes/dmd"
+#define GLTF_ROUTES_DIR "C:/work/dmd2gltf2/routes/gltf"
