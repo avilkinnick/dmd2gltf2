@@ -6,6 +6,7 @@
 #include "tiny_gltf.h"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -45,6 +46,12 @@ struct ObjectRef
 
 bool is_slash(char ch);
 void replace_chars(std::string& str, char ch1, char ch2);
+void string_to_lower(std::string& str)
+{
+    std::transform(str.begin(), str.end(), str.begin(), [](unsigned char ch) {
+        return std::tolower(ch);
+    });
+}
 
 void print_valid_usage();
 
@@ -107,8 +114,29 @@ void Application::parse_arguments(int argc, char* argv[])
     }
 }
 
+void to_lower_dir(const std::filesystem::path& path)
+{
+    std::filesystem::directory_iterator dir_it(path);
+    for (auto& entry : dir_it)
+    {
+        std::string filename = entry.path().filename().string();
+        string_to_lower(filename);
+        std::string new_path_str = entry.path().parent_path().string() + '/' + filename;
+        std::filesystem::path new_path(new_path_str);
+        std::filesystem::rename(entry.path(), new_path);
+
+        if (entry.is_directory())
+        {
+            to_lower_dir(new_path);
+        }
+    }
+}
+
 void Application::convert_route()
 {
+    to_lower_dir(std::string(DMD_ROUTES_DIR) + '/' + route_name + "/models");
+    to_lower_dir(std::string(DMD_ROUTES_DIR) + '/' + route_name + "/textures");
+
     std::ifstream objects_ref(std::string(DMD_ROUTES_DIR) + '/' + route_name + "/objects.ref");
     if (!objects_ref)
     {
@@ -132,6 +160,8 @@ void Application::convert_route()
         {
             replace_chars(ref.model_path, '\\', '/');
             replace_chars(ref.texture_path, '\\', '/');
+            string_to_lower(ref.model_path);
+            string_to_lower(ref.texture_path);
             object_refs.emplace_back(std::move(ref));
         }
     }
