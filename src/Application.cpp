@@ -507,6 +507,7 @@ void convert_model(
     auto& material = gltf_model.materials.emplace_back();
     material.pbrMetallicRoughness.baseColorTexture.index = 0;
     material.pbrMetallicRoughness.baseColorTexture.texCoord = 0;
+    material.alphaMode = "MASK";
 
     auto& mesh = gltf_model.meshes.emplace_back();
     auto& primitive = mesh.primitives.emplace_back();
