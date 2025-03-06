@@ -1,533 +1,589 @@
 #include "Application.h"
 
-#include "cmake_defines.h"
-#include "logging.h"
-
-#include "tiny_gltf.h"
+#include "Geometry.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <map>
-#include <sstream>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <cstddef>
-#include <cstdint>
+using std::string_literals::operator""s;
 
-struct Vec2
+static bool is_slash(char ch)
 {
-    float x;
-    float y;
-};
-
-struct Vec3
-{
-    float x;
-    float y;
-    float z;
-};
-
-struct Vertex
-{
-    Vec3 pos;
-    Vec2 texcoord;
-};
-
-struct ObjectRef
-{
-    std::string label;
-    std::string model_path;
-    std::string texture_path;
-};
-
-bool is_slash(char ch);
-void replace_chars(std::string& str, char ch1, char ch2);
-void string_to_lower(std::string& str)
-{
-    std::transform(str.begin(), str.end(), str.begin(), [](unsigned char ch) {
-        return std::tolower(ch);
-    });
+    return ch == '/' || ch == '\\';
 }
 
-void print_valid_usage();
-
-void convert_model(
-    const std::string& in_model_path,
-    const std::string& out_model_name,
-    const std::string& out_model_directory,
-    const std::string& texture_path
-);
-
-Application::Application(int argc, char* argv[])
+bool Application::parse_args(int argc, char* argv[])
 {
-    parse_arguments(argc, argv);
-}
-
-void Application::run()
-{
-    if (route_name.empty())
+    switch (argc)
     {
-        for (const std::string& model_name : model_names)
+        case 3:
         {
-            // convert_model(std::string(DMD_MODELS_DIR) + '/' + model_name, model_name, GLTF_MODELS_DIR);
+            convert_mode = CONVERT_ROUTE;
+            in_dmd_route_path = argv[1];
+            out_gltf_route_path = argv[2];
+
+            return true;
         }
-    }
-    else
-    {
-        convert_route();
-    }
-}
-
-void Application::parse_arguments(int argc, char* argv[])
-{
-    if (argc < 2)
-    {
-        LOG_FATAL("Invalid arguments");
-        print_valid_usage();
-        throw 1;
-    }
-
-    std::string arg2 = argv[1];
-    if (arg2 == "-r")
-    {
-        if (argc != 3)
+        case 6:
         {
-            LOG_FATAL("Invalid arguments");
-            print_valid_usage();
-            throw 1;
+            convert_mode = CONVERT_MODEL;
+            in_dmd_model_path = argv[1];
+            in_texture_path = argv[2];
+            out_gltf_model_path = argv[3];
+            out_relative_bin_path = argv[4];
+            out_relative_texture_path = argv[5];
+
+            return true;
         }
-
-        route_name = argv[2];
-    }
-    else
-    {
-        model_names.reserve(argc - 1);
-        for (int i = 1; i < argc; ++i)
+        default:
         {
-            std::string model_name = argv[i];
-            model_names.emplace_back(model_name.substr(0, model_name.length() - 4));
+            std::cerr << "Valid usage:\n"
+                "    dmd2gltf in_dmd_route_path out_gltf_route_path\n"
+                "    dmd2gltf in_dmd_model_path in_texture_path out_gltf_model_path out_relative_bin_path out_relative_texture_path" << std::endl;
+
+            return false;
         }
     }
 }
 
-void to_lower_dir(const std::filesystem::path& path)
+bool Application::convert()
 {
-    std::filesystem::directory_iterator dir_it(path);
-    for (auto& entry : dir_it)
-    {
-        std::string filename = entry.path().filename().string();
-        string_to_lower(filename);
-        std::string new_path_str = entry.path().parent_path().string() + '/' + filename;
-        std::filesystem::path new_path(new_path_str);
-        std::filesystem::rename(entry.path(), new_path);
-
-        if (entry.is_directory())
-        {
-            to_lower_dir(new_path);
-        }
-    }
+    return (convert_mode == CONVERT_ROUTE) ? convert_route() : convert_model();
 }
 
-void Application::convert_route()
+bool Application::convert_route()
 {
-    to_lower_dir(std::string(DMD_ROUTES_DIR) + '/' + route_name + "/models");
-    to_lower_dir(std::string(DMD_ROUTES_DIR) + '/' + route_name + "/textures");
+    std::replace(in_dmd_route_path.begin(), in_dmd_route_path.end(), '\\', '/');
+    std::replace(out_gltf_route_path.begin(), out_gltf_route_path.end(), '\\', '/');
 
-    std::ifstream objects_ref(std::string(DMD_ROUTES_DIR) + '/' + route_name + "/objects.ref");
+    while (in_dmd_route_path.back() == '/')
+    {
+        in_dmd_route_path.pop_back();
+    }
+
+    while (out_gltf_route_path.back() == '/')
+    {
+        out_gltf_route_path.pop_back();
+    }
+
+    std::ifstream objects_ref(in_dmd_route_path + "/objects.ref");
     if (!objects_ref)
     {
-        LOG_ERROR("Failed to open objects.ref");
-        return;
+        std::cerr << "Failed to open objects.ref" << std::endl;
+        return false;
     }
 
-    std::vector<ObjectRef> object_refs;
+    using Label = std::string;
+    using RelativePath = std::string;
+    std::map<Label, std::pair<RelativePath, RelativePath>> objects;
 
-    std::string line;
-    while (std::getline(objects_ref, line))
+    std::string buffer;
+    while (std::getline(objects_ref, buffer))
     {
-        std::istringstream line_stream(line);
-        ObjectRef ref;
-        line_stream >> ref.label >> ref.model_path >> ref.texture_path;
-        if (line_stream
-            && !ref.texture_path.empty()
-            && is_slash(ref.model_path.front())
-            && is_slash(ref.texture_path.front())
-        )
+        std::istringstream ss(buffer);
+        std::string label, relative_dmd_model_path, relative_texture_path;
+        ss >> label >> relative_dmd_model_path >> relative_texture_path;
+        if (ss && !is_slash(label.front()) && is_slash(relative_dmd_model_path.front()) && is_slash(relative_texture_path.front()))
         {
-            replace_chars(ref.model_path, '\\', '/');
-            replace_chars(ref.texture_path, '\\', '/');
-            string_to_lower(ref.model_path);
-            string_to_lower(ref.texture_path);
-            object_refs.emplace_back(std::move(ref));
+            std::replace(relative_dmd_model_path.begin(), relative_dmd_model_path.end(), '\\', '/');
+            std::replace(relative_texture_path.begin(), relative_texture_path.end(), '\\', '/');
+
+            objects.insert({label, {relative_dmd_model_path, relative_texture_path}});
         }
     }
 
     objects_ref.close();
 
-    std::string new_route_dir = std::string(GLTF_ROUTES_DIR) + '/' + route_name;
-
-    if (!std::filesystem::create_directory(new_route_dir)
-        && !std::filesystem::exists(new_route_dir))
+    if (objects.empty())
     {
-        LOG_ERROR("Failed to create folder for route %s", route_name.c_str());
-        return;
+        std::cerr << "Failed to find objects in objects.ref" << std::endl;
+        return false;
     }
 
-    if (!std::filesystem::create_directory(new_route_dir + "/models")
-        && !std::filesystem::exists(new_route_dir + "/models"))
+    std::filesystem::create_directories(out_gltf_route_path);
+    std::filesystem::create_directory(out_gltf_route_path + "/textures");
+
+    if (!std::filesystem::exists(out_gltf_route_path + "/topology"))
     {
-        LOG_ERROR("Failed to create folder for models for route %s", route_name.c_str());
-        return;
+        std::filesystem::copy(in_dmd_route_path + "/topology", out_gltf_route_path + "/topology");
     }
 
-    if (!std::filesystem::create_directory(new_route_dir + "/textures")
-        && !std::filesystem::exists(new_route_dir + "/models"))
+    if (!std::filesystem::exists(out_gltf_route_path + "/description.xml"))
     {
-        LOG_ERROR("Failed to create folder for textures for route %s", route_name.c_str());
-        return;
+        std::filesystem::copy(in_dmd_route_path + "/description.xml", out_gltf_route_path + "/description.xml");
     }
 
-    for (ObjectRef& ref : object_refs)
+    if (!std::filesystem::exists(out_gltf_route_path + "/route1.map"))
     {
-        auto second_slash_pos = ref.model_path.substr(1).find_first_of('/') + 1;
-        std::string out_model_name = ref.model_path.substr(second_slash_pos + 1);
-        out_model_name = out_model_name.substr(0, out_model_name.length() - 4);
+        std::filesystem::copy(in_dmd_route_path + "/route1.map", out_gltf_route_path + "/route1.map");
+    }
 
-        std::ifstream texture_file(std::string(DMD_ROUTES_DIR) + '/' + route_name + ref.texture_path);
-        if (texture_file)
+    std::map<Label, RelativePath> new_objects;
+
+    for (const auto& [label, paths] : objects)
+    {
+        in_dmd_model_path = in_dmd_route_path + paths.first;
+        in_texture_path = in_dmd_route_path + paths.second;
+
+        // std::string lower_model_path = paths.first;
+        // std::string lower_texture_path = paths.second;
+
+        // for (char& ch : lower_model_path)
+        // {
+        //     ch = std::tolower(ch);
+        // }
+        // for (char& ch : lower_texture_path)
+        // {
+        //     ch = std::tolower(ch);
+        // }
+
+        std::filesystem::path model_path = paths.first;
+        std::filesystem::path texture_path = paths.second;
+
+        std::filesystem::create_directories(out_gltf_route_path + model_path.parent_path().string() + "/bin");
+        out_gltf_model_path = out_gltf_route_path + model_path.parent_path().string() + '/' + model_path.stem().string() + ".gltf";
+        out_relative_bin_path = "bin/"s + model_path.stem().string() + ".bin";
+
+        std::string mps = model_path.string();
+        auto slash_count = std::count(mps.begin(), mps.end(), '/');
+        out_relative_texture_path = "";
+        for (int i = 1; i < slash_count; ++i)
         {
-            if (!std::filesystem::exists(new_route_dir + ref.texture_path))
-            {
-                std::filesystem::copy_file(
-                    std::string(DMD_ROUTES_DIR) + '/' + route_name + ref.texture_path,
-                    new_route_dir + ref.texture_path
-                );
-            }
+            out_relative_texture_path += "../";
         }
-        else
+        out_relative_texture_path += "textures/" + texture_path.filename().string();
+
+        if (convert_model())
         {
-            LOG_ERROR("No texture %s in original route", ref.texture_path.c_str());
-            continue;
+            new_objects.insert({label, model_path.parent_path().string() + '/' + model_path.stem().string() + ".gltf"});
         }
 
-        // auto last_slash_pos = ref.model_path.find_last_of('/');
-        // std::string path1 = ref.model_path.substr(0, last_slash_pos);
-        // std::string model_name =
-        replace_chars(out_model_name, '/', '_');
-        convert_model(
-            std::string(DMD_ROUTES_DIR) + '/' + route_name + ref.model_path,
-            out_model_name,
-            new_route_dir + "/models",
-            ref.texture_path
-        );
-        ref.model_path = "/models/" + out_model_name + ".gltf";
+        // std::cout << in_dmd_model_path << '\n'
+        //     << in_texture_path << '\n'
+        //     << out_gltf_model_path << '\n'
+        //     << out_relative_bin_path << '\n'
+        //     << out_relative_texture_path << "\n\n";
+
+        // std::filesystem::path z(paths.first);
+        // std::cout <<
+        //     "Root name: " << z.root_name() << "\n"
+        //     "Root directory: " << z.root_directory() << "\n"
+        //     "Root path: " << z.root_path() << "\n"
+        //     "Relative path: " << z.relative_path() << "\n"
+        //     "Parent path: " << z.parent_path() << "\n"
+        //     "Filename: " << z.filename() << "\n"
+        //     "Stem: " << z.stem() << "\n"
+        //     "Extension: " << z.extension() << "\n\n";
+
+        // std::cout << label << "    " << paths.first << "    " << paths.second << std::endl;
     }
 
-    std::ofstream new_objects_ref(std::ofstream(new_route_dir + "/objects.ref"));
+    std::ofstream new_objects_ref(out_gltf_route_path + "/objects.ref");
     if (!new_objects_ref)
     {
-        LOG_ERROR("Failed to crete new objects.ref for route %s", route_name.c_str());
-        return;
+        std::cerr << "Failed to open new objects.ref" << std::endl;
+        return false;
     }
 
-    for (const ObjectRef& ref : object_refs)
+    for (const auto& [label, path] : new_objects)
     {
-        new_objects_ref << ref.label << "    " << ref.model_path << '\n';
+        new_objects_ref << label << "    " << path << '\n';
     }
 
-    new_objects_ref.close();
+    return true;
 }
 
-bool is_slash(char ch)
+bool Application::convert_model()
 {
-    return ch == '/' || ch == '\\';
-}
-
-void replace_chars(std::string& str, char ch1, char ch2)
-{
-    std::replace(str.begin(), str.end(), ch1, ch2);
-}
-
-void print_valid_usage()
-{
-    LOG_INFO(
-        "Valid usage:\n"
-        "    dmd2gltf model1.dmd model2.dmd ...\n"
-        "    dmd2gltf -r route_name"
-    );
-}
-
-void convert_model(
-    const std::string& in_model_path,
-    const std::string& out_model_name,
-    const std::string& out_model_directory,
-    const std::string& texture_path
-)
-{
-    std::ifstream dmd_file(in_model_path);
-    if (!dmd_file)
+    std::ifstream texture(in_texture_path);
+    if (!texture)
     {
-        LOG_ERROR("Failed to open %s", in_model_path.c_str());
-        return;
+        std::cerr << "Failed to open " << in_texture_path << std::endl;
+        return false;
+    }
+    // std::cout <<
+        // "\nin_model: " << in_dmd_model_path << "\n"
+        // "in_texture: " << in_texture_path << "\n"
+        // "out_gltf: " << out_gltf_model_path << "\n"
+        // "out_bin: " << out_relative_bin_path << "\n"
+        // "out_texture: " << out_relative_texture_path << "\n";
+
+    auto last_slash_pos = out_gltf_model_path.find_last_of('/');
+    if (last_slash_pos == std::string::npos)
+    {
+        gltf_directory_path = ".";
+    }
+    else
+    {
+        gltf_directory_path = out_gltf_model_path.substr(0, last_slash_pos);
+    }
+
+    Geometry model_data;
+    if (!get_dmd_model_data(model_data))
+    {
+        return false;
+    }
+
+    return generate_gltf_model(model_data);
+}
+
+bool Application::get_dmd_model_data(Geometry& model_data)
+{
+    using PosIndex = std::uint32_t;
+    using TexIndex = std::uint32_t;
+    using VertexIndex = std::uint32_t;
+
+    std::ifstream model_file(in_dmd_model_path);
+    if (!model_file)
+    {
+        std::cerr << "Failed to open " << in_dmd_model_path << std::endl;
+        return false;
     }
 
     std::string buffer;
     while (buffer != "TriMesh()")
     {
-        dmd_file >> buffer;
-        if (!dmd_file)
+        model_file >> buffer;
+        if (!model_file)
         {
-            LOG_ERROR("Failed to find TriMesh() in %s", in_model_path.c_str());
-            return;
+            std::cerr << "Failed to find \"TriMesh()\" in " << in_dmd_model_path << std::endl;
+            return false;
         }
     }
 
-    dmd_file >> buffer >> buffer;
+    model_file >> buffer >> buffer;
 
-    std::uint32_t position_count, position_face_count;
-    dmd_file >> position_count >> position_face_count;
+    std::uint32_t pos_count, pos_face_count;
+    model_file >> pos_count >> pos_face_count;
 
-    dmd_file >> buffer >> buffer;
+    model_file >> buffer >> buffer;
 
-    std::vector<Vec3> positions(position_count);
-    for (Vec3& position : positions)
+    std::vector<Vec3> positions(pos_count);
+    for (auto& pos : positions)
     {
-        dmd_file >> position.x >> position.y >> position.z;
+        model_file >> pos.x >> pos.y >> pos.z;
     }
 
-    if (!dmd_file)
+    if (!model_file)
     {
-        LOG_ERROR("Failed to read position values from %s", in_model_path.c_str());
-        return;
+        std::cerr << "Failed to read positions from " << in_dmd_model_path << std::endl;
     }
 
-    dmd_file >> buffer >> buffer >> buffer >> buffer;
+    model_file >> buffer >> buffer >> buffer >> buffer;
 
-    std::vector<std::uint32_t> position_indices(position_face_count * 3);
-    for (std::uint32_t& index : position_indices)
+    std::vector<PosIndex> pos_indices(pos_face_count * 3);
+    for (auto& index : pos_indices)
     {
-        dmd_file >> index;
+        model_file >> index;
         --index;
     }
 
-    if (!dmd_file)
+    if (!model_file)
     {
-        LOG_ERROR("Failed to read position indices from %s", in_model_path.c_str());
-        return;
+        std::cerr << "Failed to read position indices from " << in_dmd_model_path << std::endl;
+        return false;
     }
 
     while (buffer != "Texture:")
     {
-        dmd_file >> buffer;
-        if (!dmd_file)
+        model_file >> buffer;
+        if (!model_file)
         {
-            LOG_ERROR("Failed to find Texture: in %s", in_model_path.c_str());
-            return;
+            std::cerr << "Failed to find \"Texture:\" in " << in_dmd_model_path << std::endl;
+            return false;
         }
     }
 
-    dmd_file >> buffer >> buffer;
+    model_file >> buffer >> buffer;
 
-    std::uint32_t texcoord_count, texcoord_face_count;
-    dmd_file >> texcoord_count >> texcoord_face_count;
+    std::uint32_t tex_coord_count, tex_face_count;
+    model_file >> tex_coord_count >> tex_face_count;
 
-    if (position_face_count != texcoord_face_count)
+    if (pos_face_count != tex_face_count)
     {
-        LOG_ERROR("Position face count and texture face count are not equal");
-        return;
+        std::cerr << "Position face count is not equal to texture face count in " << in_dmd_model_path << std::endl;
+        return false;
     }
 
-    std::uint32_t face_count = position_face_count;
+    std::uint32_t face_count = pos_face_count;
 
-    dmd_file >> buffer >> buffer;
+    model_file >> buffer >> buffer;
 
-    std::vector<Vec2> texcoords(texcoord_count);
-    for (Vec2& texcoord : texcoords)
+    std::vector<Vec2> tex_coords(tex_coord_count);
+    for (auto& tex_coord : tex_coords)
     {
-        dmd_file >> texcoord.x >> texcoord.y >> buffer;
+        model_file >> tex_coord.x >> tex_coord.y >> buffer;
     }
 
-    if (!dmd_file)
+    if (!model_file)
     {
-        LOG_ERROR("Failed to read texcoord values from %s", in_model_path.c_str());
-        return;
+        std::cerr << "Failed to read texture coordinates from " << in_dmd_model_path << std::endl;
+        return false;
     }
 
-    dmd_file >> buffer >> buffer >> buffer >> buffer >> buffer;
+    model_file >> buffer >> buffer >> buffer >> buffer >> buffer;
 
-    std::vector<std::uint32_t> textcoord_indices(face_count * 3);
-    for (std::uint32_t& index : textcoord_indices)
+    std::vector<TexIndex> tex_indices(face_count * 3);
+    for (auto& index : tex_indices)
     {
-        dmd_file >> index;
+        model_file >> index;
         --index;
     }
 
-    if (!dmd_file)
+    if (!model_file)
     {
-        LOG_ERROR("Failed to read texture indices from %s", in_model_path.c_str());
-        return;
+        std::cerr << "Failed to read texture indices from " << in_dmd_model_path << std::endl;
+        return false;
     }
 
-    dmd_file.close();
+    model_file.close();
 
-    for (Vec3& position : positions)
-    {
-        std::swap(position.y, position.z);
-        position.z = -position.z;
-    }
+    model_data.vertices.reserve(face_count * 3);
+    model_data.indices.resize(face_count * 3);
 
-    std::vector<Vertex> vertices;
-    vertices.reserve(face_count * 3);
-
-    std::vector<std::uint32_t> indices;
-    indices.reserve(face_count * 3);
-
-    std::map<std::pair<std::uint32_t, std::uint32_t>, std::uint32_t> unique_indices;
+    std::map<std::pair<PosIndex, TexIndex>, VertexIndex> unique_indices;
 
     for (std::uint32_t i = 0; i < face_count * 3; ++i)
     {
-        std::uint32_t position_index = position_indices[i];
-        std::uint32_t texcoord_index = textcoord_indices[i];
+        PosIndex pos_index = pos_indices[i];
+        TexIndex tex_index = tex_indices[i];
 
-        auto found_it = unique_indices.find(std::make_pair(position_index, texcoord_index));
+        auto found_it = unique_indices.find({pos_index, tex_index});
         if (found_it == unique_indices.end())
         {
-            vertices.emplace_back(Vertex{positions[position_index], texcoords[texcoord_index]});
-            indices.emplace_back(vertices.size() - 1);
-            unique_indices.insert({std::make_pair(position_index, texcoord_index), vertices.size() - 1});
+            model_data.vertices.emplace_back(Vertex{positions[pos_index], tex_coords[tex_index]});
+
+            VertexIndex new_vertex_index = model_data.vertices.size() - 1;
+            model_data.indices[i] = new_vertex_index;
+            unique_indices.insert({{pos_index, tex_index}, new_vertex_index});
         }
         else
         {
-            indices.emplace_back(found_it->second);
+            model_data.indices[i] = found_it->second;
         }
     }
 
-    vertices.shrink_to_fit();
+    model_data.vertices.shrink_to_fit();
 
-    std::string bin_file_path = out_model_directory + '/' + out_model_name + ".bin";
+    return true;
+}
 
-    std::ofstream bin_file(bin_file_path, std::ios::binary);
+bool Application::generate_gltf_model(Geometry& model_data)
+{
+    for (auto& vertex : model_data.vertices)
+    {
+        std::swap(vertex.pos.y, vertex.pos.z);
+        vertex.pos.z = -vertex.pos.z;
+    }
+
+    std::string full_bin_path = gltf_directory_path + '/' + out_relative_bin_path;
+
+    std::ofstream bin_file(full_bin_path, std::ios::binary);
     if (!bin_file)
     {
-        LOG_ERROR("Failed to open bin file for %s", out_model_name.c_str());
-        return;
+        std::cerr << "Failed to open " << full_bin_path << std::endl;
+        return false;
     }
 
-    for (const Vertex& vertex : vertices)
+    for (const auto& vertex : model_data.vertices)
     {
-        bin_file.write(reinterpret_cast<const char*>(&vertex.pos), sizeof(Vec3));
+        bin_file.write(reinterpret_cast<const char*>(&vertex.pos), sizeof(vertex.pos));
     }
-    std::size_t positions_byte_length = bin_file.tellp();
 
-    for (const Vertex& vertex : vertices)
+    auto positions_byte_length = bin_file.tellp();
+
+    for (const auto& vertex : model_data.vertices)
     {
-        bin_file.write(reinterpret_cast<const char*>(&vertex.texcoord), sizeof(Vec2));
+        bin_file.write(reinterpret_cast<const char*>(&vertex.tex_coord), sizeof(vertex.tex_coord));
     }
-    std::size_t texcoords_byte_length = bin_file.tellp();
-    texcoords_byte_length -= positions_byte_length;
 
-    for (std::uint32_t index : indices)
+    auto tex_coords_byte_length = bin_file.tellp() - positions_byte_length;
+
+    for (auto index : model_data.indices)
     {
-        bin_file.write(reinterpret_cast<const char*>(&index), sizeof(std::uint32_t));
+        bin_file.write(reinterpret_cast<const char*>(&index), sizeof(index));
     }
 
-    std::size_t indices_byte_length = bin_file.tellp();
-    indices_byte_length -= positions_byte_length + texcoords_byte_length;
+    auto indices_byte_length = bin_file.tellp() - tex_coords_byte_length - positions_byte_length;
 
     bin_file.close();
 
-    tinygltf::Model gltf_model;
+    Vec3 min_pos, max_pos;
+    Vec2 min_tex, max_tex;
+    min_pos = max_pos = model_data.vertices[0].pos;
+    min_tex = max_tex = model_data.vertices[0].tex_coord;
 
-    auto& gltf_buffer = gltf_model.buffers.emplace_back();
-    gltf_buffer.data.reserve(positions_byte_length + texcoords_byte_length + indices_byte_length);
-    gltf_buffer.uri = out_model_name + ".bin";
-
-    std::ifstream bin_data(bin_file_path, std::ios::binary);
-    unsigned char byte;
-    while (bin_data.read(reinterpret_cast<char*>(&byte), sizeof(unsigned char)))
+    for (const auto& vertex : model_data.vertices)
     {
-        gltf_buffer.data.emplace_back(byte);
+        min_pos.x = std::min(min_pos.x, vertex.pos.x);
+        min_pos.y = std::min(min_pos.y, vertex.pos.y);
+        min_pos.z = std::min(min_pos.z, vertex.pos.z);
+
+        max_pos.x = std::max(max_pos.x, vertex.pos.x);
+        max_pos.y = std::max(max_pos.y, vertex.pos.y);
+        max_pos.z = std::max(max_pos.z, vertex.pos.z);
+
+        min_tex.x = std::min(min_tex.x, vertex.tex_coord.x);
+        min_tex.y = std::min(min_tex.y, vertex.tex_coord.y);
+
+        max_tex.x = std::max(max_tex.x, vertex.tex_coord.x);
+        max_tex.y = std::max(max_tex.y, vertex.tex_coord.y);
     }
 
-    bin_data.close();
+    std::ofstream gltf_file(out_gltf_model_path);
+    if (!gltf_file)
+    {
+        std::cerr << "Failed to open " << out_gltf_model_path << std::endl;
+        return false;
+    }
 
-    auto& positions_buffer_view = gltf_model.bufferViews.emplace_back();
-    positions_buffer_view.buffer = 0;
-    positions_buffer_view.byteLength = positions_byte_length;
-    positions_buffer_view.byteOffset = 0;
-    positions_buffer_view.target = TINYGLTF_TARGET_ARRAY_BUFFER;
+    gltf_file << "{\n"
+        "    \"asset\": {\n"
+        "        \"version\": \"2.0\"\n"
+        "    },\n"
+        "    \"buffers\": [\n"
+        "        {\n"
+        "            \"uri\": \"" << out_relative_bin_path << "\",\n"
+        "            \"byteLength\": " << positions_byte_length + tex_coords_byte_length + indices_byte_length << "\n"
+        "        }\n"
+        "    ],\n"
+        "    \"bufferViews\": [\n"
+        "        {\n"
+        "            \"buffer\": 0,\n"
+        "            \"byteOffset\": 0,\n"
+        "            \"byteLength\": " << positions_byte_length << ",\n"
+        "            \"target\": 34962\n"
+        "        },\n"
+        "        {\n"
+        "            \"buffer\": 0,\n"
+        "            \"byteOffset\": " << positions_byte_length << ",\n"
+        "            \"byteLength\": " << tex_coords_byte_length << ",\n"
+        "            \"target\": 34962\n"
+        "        },\n"
+        "        {\n"
+        "            \"buffer\": 0,\n"
+        "            \"byteOffset\": " << positions_byte_length + tex_coords_byte_length << ",\n"
+        "            \"byteLength\": " << indices_byte_length << ",\n"
+        "            \"target\": 34963\n"
+        "        }\n"
+        "    ],\n"
+        "    \"accessors\": [\n"
+        "        {\n"
+        "            \"bufferView\": 0,\n"
+        "            \"componentType\": 5126,\n"
+        "            \"count\": " << model_data.vertices.size() << ",\n"
+        "            \"type\": \"VEC3\",\n"
+        "            \"max\": [\n"
+        "                " << max_pos.x << ",\n"
+        "                " << max_pos.y << ",\n"
+        "                " << max_pos.z << "\n"
+        "            ],\n"
+        "            \"min\": [\n"
+        "                " << min_pos.x << ",\n"
+        "                " << min_pos.y << ",\n"
+        "                " << min_pos.z << "\n"
+        "            ]\n"
+        "        },\n"
+        "        {\n"
+        "            \"bufferView\": 1,\n"
+        "            \"componentType\": 5126,\n"
+        "            \"count\": " << model_data.vertices.size() << ",\n"
+        "            \"type\": \"VEC2\",\n"
+        "            \"max\": [\n"
+        "                " << max_tex.x << ",\n"
+        "                " << max_tex.y << "\n"
+        "            ],\n"
+        "            \"min\": [\n"
+        "                " << min_tex.x << ",\n"
+        "                " << min_tex.y << "\n"
+        "            ]\n"
+        "        },\n"
+        "        {\n"
+        "            \"bufferView\": 2,\n"
+        "            \"componentType\": 5125,\n"
+        "            \"count\": " << model_data.indices.size() << ",\n"
+        "            \"type\": \"SCALAR\",\n"
+        "            \"max\": [\n"
+        "                " << model_data.vertices.size() - 1 << "\n"
+        "            ],\n"
+        "            \"min\": [\n"
+        "                0\n"
+        "            ]\n"
+        "        }\n"
+        "    ],\n"
+        "    \"images\": [\n"
+        "        {\n"
+        "            \"uri\": \"" << out_relative_texture_path << "\"\n"
+        "        }\n"
+        "    ],\n"
+        "    \"samplers\": [\n"
+        "        {\n"
+        "            \"magFilter\": 9729,\n"
+        "            \"minFilter\": 9987,\n"
+        "            \"wrapS\": 10497,\n"
+        "            \"wrapT\": 10497\n"
+        "        }\n"
+        "    ],\n"
+        "    \"textures\": [\n"
+        "        {\n"
+        "            \"sampler\": 0,\n"
+        "            \"source\": 0\n"
+        "        }\n"
+        "    ],\n"
+        "    \"materials\": [\n"
+        "        {\n"
+        "            \"pbrMetallicRoughness\": {\n"
+        "                \"baseColorTexture\": {\n"
+        "                    \"index\": 0,\n"
+        "                    \"texCoord\": 0\n"
+        "                }\n"
+        "            },\n"
+        "            \"alphaMode\": \"MASK\"\n"
+        "        }\n"
+        "    ],\n"
+        "    \"meshes\": [\n"
+        "        {\n"
+        "            \"primitives\": [\n"
+        "                {\n"
+        "                    \"attributes\": {\n"
+        "                        \"POSITION\": 0,\n"
+        "                        \"TEXCOORD_0\": 1\n"
+        "                    },\n"
+        "                    \"indices\": 2,\n"
+        "                    \"material\": 0,\n"
+        "                    \"mode\": 4\n"
+        "                }\n"
+        "            ]\n"
+        "        }\n"
+        "    ],\n"
+        "    \"nodes\": [\n"
+        "        {\n"
+        "            \"mesh\": 0\n"
+        "        }\n"
+        "    ],\n"
+        "    \"scenes\": [\n"
+        "        {\n"
+        "            \"nodes\": [ 0 ]\n"
+        "        }\n"
+        "    ],\n"
+        "    \"scene\": 0\n"
+        "}\n";
 
-    auto& texcoord_buffer_view = gltf_model.bufferViews.emplace_back();
-    texcoord_buffer_view.buffer = 0;
-    texcoord_buffer_view.byteLength = texcoords_byte_length;
-    texcoord_buffer_view.byteOffset = positions_byte_length;
-    texcoord_buffer_view.target = TINYGLTF_TARGET_ARRAY_BUFFER;
+    gltf_file.close();
 
-    auto& indices_buffer_view = gltf_model.bufferViews.emplace_back();
-    indices_buffer_view.buffer = 0;
-    indices_buffer_view.byteLength = indices_byte_length;
-    indices_buffer_view.byteOffset = positions_byte_length + texcoords_byte_length;
-    indices_buffer_view.target = TINYGLTF_TARGET_ELEMENT_ARRAY_BUFFER;
+    if (!std::filesystem::exists(gltf_directory_path + '/' + out_relative_texture_path))
+    {
+        std::filesystem::copy(in_texture_path, gltf_directory_path + '/' + out_relative_texture_path);
+    }
 
-    auto& positions_accessor = gltf_model.accessors.emplace_back();
-    positions_accessor.bufferView = 0;
-    positions_accessor.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
-    positions_accessor.count = vertices.size();
-    positions_accessor.type = TINYGLTF_TYPE_VEC3;
-
-    auto& texcoords_accessor = gltf_model.accessors.emplace_back();
-    texcoords_accessor.bufferView = 1;
-    texcoords_accessor.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
-    texcoords_accessor.count = vertices.size();
-    texcoords_accessor.type = TINYGLTF_TYPE_VEC2;
-
-    auto& indices_accessor = gltf_model.accessors.emplace_back();
-    indices_accessor.bufferView = 2;
-    indices_accessor.componentType = TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT;
-    indices_accessor.count = indices.size();
-    indices_accessor.type = TINYGLTF_TYPE_SCALAR;
-
-    auto& image = gltf_model.images.emplace_back();
-    image.uri = std::string("..") + texture_path;
-
-    auto& sampler = gltf_model.samplers.emplace_back();
-    sampler.minFilter = TINYGLTF_TEXTURE_FILTER_LINEAR_MIPMAP_LINEAR;
-    sampler.magFilter = TINYGLTF_TEXTURE_FILTER_LINEAR;
-    sampler.wrapS = TINYGLTF_TEXTURE_WRAP_REPEAT;
-    sampler.wrapT = TINYGLTF_TEXTURE_WRAP_REPEAT;
-
-    auto& texture = gltf_model.textures.emplace_back();
-    texture.sampler = 0;
-    texture.source = 0;
-
-    auto& material = gltf_model.materials.emplace_back();
-    material.pbrMetallicRoughness.baseColorTexture.index = 0;
-    material.pbrMetallicRoughness.baseColorTexture.texCoord = 0;
-    material.alphaMode = "MASK";
-
-    auto& mesh = gltf_model.meshes.emplace_back();
-    auto& primitive = mesh.primitives.emplace_back();
-    primitive.attributes.insert({"POSITION", 0});
-    primitive.attributes.insert({"TEXCOORD_0", 1});
-    primitive.material = 0;
-    primitive.indices = 2;
-    primitive.mode = TINYGLTF_MODE_TRIANGLES;
-
-    tinygltf::Scene a;
-
-    auto& node = gltf_model.nodes.emplace_back();
-    node.name = out_model_name;
-    node.mesh = 0;
-
-    auto& scene = gltf_model.scenes.emplace_back();
-    scene.nodes = {0};
-
-    gltf_model.defaultScene = 0;
-
-    tinygltf::TinyGLTF gltf;
-    gltf.WriteGltfSceneToFile(&gltf_model, out_model_directory + '/' + out_model_name + ".gltf", true, false, true, false);
+    return true;
 }
