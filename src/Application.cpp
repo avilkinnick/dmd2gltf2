@@ -547,7 +547,7 @@ bool Application::generate_gltf_model(Geometry& model_data)
         "                    \"texCoord\": 0\n"
         "                }\n"
         "            },\n"
-        "            \"alphaMode\": \"MASK\"\n"
+        "            \"alphaMode\": \"BLEND\"\n"
         "        }\n"
         "    ],\n"
         "    \"meshes\": [\n"
