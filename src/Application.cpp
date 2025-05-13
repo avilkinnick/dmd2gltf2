@@ -322,6 +322,7 @@ bool Application::get_dmd_model_data(Geometry& model_data)
     for (auto& tex_coord : tex_coords)
     {
         model_file >> tex_coord.x >> tex_coord.y >> buffer;
+        tex_coord.y = 1.0f - tex_coord.y;
     }
 
     if (!model_file)
